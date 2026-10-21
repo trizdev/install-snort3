@@ -1,0 +1,4 @@
+snort-src/
+build/
+*.log
+*.o
