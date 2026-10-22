@@ -31,8 +31,44 @@ Run it as a **regular user** (not root) — the script calls `sudo` when needed.
 | `PREFIX`    | `/usr/local`      | Install directory                    |
 | `SRC_DIR`   | `$HOME/snort-src` | Where sources are cloned and built   |
 | `FORCE_DAQ` | `0`               | Set to `1` to force rebuilding libdaq |
+| `DASHBOARD` | `0`               | Set to `1` to also install the alerts dashboard (same as `--dashboard`) |
+| `SNORT_LOG_DIR` | `/var/log/snort` | Where Snort writes `alert_json.txt` (dashboard only) |
+| `DASHBOARD_DIR` | `/opt/snort-dashboard` | Where the dashboard is installed |
+| `DASHBOARD_PORT` | `8080`        | Dashboard port (always bound to `127.0.0.1`) |
+| `DASHBOARD_REF` | `v0.1.0`       | snort3-dashboard tag to install |
 
 Example: `PREFIX=$HOME/.local ./install-snort3.sh`
+
+## Alerts dashboard (optional)
+
+![snort3-dashboard](https://raw.githubusercontent.com/trizdev/snort3-dashboard/v0.1.0/docs/dashboard.png)
+
+`--dashboard` turns on JSON alert logging and installs [snort3-dashboard](https://github.com/trizdev/snort3-dashboard), a small read-only web page for Snort 3 alerts: priority counters, an alerts-per-minute chart, top sources, top rules and a live, filterable table. It is Python 3 standard library only, makes no external requests and listens on `127.0.0.1`.
+
+```bash
+./install-snort3.sh --dashboard        # or: DASHBOARD=1 ./install-snort3.sh
+```
+
+Without the flag the installer behaves exactly as before. With it, after Snort is installed, the script:
+
+1. Appends an `alert_json` block to `snort.lua` (a backup is saved first; skipped if `alert_json` is already configured) so Snort writes `/var/log/snort/alert_json.txt`, rolling it over at 100 MB.
+2. Clones snort3-dashboard at the pinned tag (`v0.1.0`), checks the commit hash, and runs its `install.sh`. That creates a `snort-dashboard` system user with read-only access to `/var/log/snort`, installs the dashboard to `/opt/snort-dashboard` and enables the `snort-dashboard` systemd service.
+
+Alerts show up once Snort is running with that config, for example:
+
+```bash
+sudo snort -c /usr/local/etc/snort/snort.lua -i eth0
+```
+
+If you start Snort with `-l <dir>`, that overrides the log directory. Use `-l /var/log/snort` or set `SNORT_LOG_DIR`.
+
+The dashboard only listens on `127.0.0.1`. From your own machine, open an SSH tunnel and browse to http://127.0.0.1:8080:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@your-server
+```
+
+Settings (port, HTTP basic auth via `DASHBOARD_AUTH`) live in `/etc/snort-dashboard.env`. See the [snort3-dashboard README](https://github.com/trizdev/snort3-dashboard#readme) for settings, security notes and a demo you can run without Snort.
 
 ## Verify
 

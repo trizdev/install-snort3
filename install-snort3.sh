@@ -4,7 +4,8 @@
 #
 # Usage:
 #   chmod +x install-snort3.sh
-#   ./install-snort3.sh
+#   ./install-snort3.sh              # Snort 3 only
+#   ./install-snort3.sh --dashboard  # Snort 3 + JSON alert logging + web dashboard
 #
 # The script calls sudo when needed. Do not run it directly as root.
 #
@@ -23,11 +24,37 @@ die()  { echo -e "${RED}[error]${RESET} $*" >&2; exit 1; }
 PREFIX="${PREFIX:-/usr/local}"
 SRC_DIR="${SRC_DIR:-$HOME/snort-src}"
 JOBS="$(nproc)"
+DASHBOARD="${DASHBOARD:-0}"
+SNORT_LOG_DIR="${SNORT_LOG_DIR:-/var/log/snort}"
+DASHBOARD_DIR="${DASHBOARD_DIR:-/opt/snort-dashboard}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
+# snort3-dashboard release to install, pinned to a tag and its commit.
+DASHBOARD_REPO="${DASHBOARD_REPO:-https://github.com/trizdev/snort3-dashboard.git}"
+DASHBOARD_REF="${DASHBOARD_REF:-v0.1.0}"
+DASHBOARD_COMMIT="${DASHBOARD_COMMIT-aca1b7142ae6ec733cf233a3135a5937bdb29748}"
+
+usage() {
+  cat <<USAGE
+Usage: $0 [--dashboard] [--help]
+
+  --dashboard   Also enable alert_json logging to $SNORT_LOG_DIR and install
+                snort3-dashboard ($DASHBOARD_REF) as a systemd service (same as DASHBOARD=1).
+USAGE
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --dashboard) DASHBOARD=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "Unknown option: $arg" ;;
+  esac
+done
 
 # ---- preflight checks ----
 [[ $EUID -eq 0 ]] && die "Do not run as root. Run as a normal user; the script uses sudo when needed."
 command -v sudo >/dev/null || die "sudo not found."
 if [[ -r /etc/os-release ]]; then
+  # shellcheck source=/dev/null
   . /etc/os-release
   [[ "${ID:-}" == "ubuntu" ]] || warn "Made for Ubuntu. Detected: ${PRETTY_NAME:-unknown}."
   [[ "${VERSION_ID:-}" == "24.04" ]] || warn "Tested on Ubuntu 24.04. Detected: ${VERSION_ID:-?}."
@@ -93,4 +120,64 @@ if "$PREFIX/bin/snort" -V 2>/dev/null; then
   echo "Test the config:  snort -c $PREFIX/etc/snort/snort.lua"
 else
   die "Build finished but 'snort -V' failed. Run 'sudo ldconfig' and open a new terminal."
+fi
+
+# ---- optional: alert_json logging + snort3-dashboard ----
+enable_alert_json() {
+  local conf="$PREFIX/etc/snort/snort.lua"
+  local marker="-- install-snort3: alert_json for the dashboard"
+  local output_line="output = { logdir = '$SNORT_LOG_DIR' }"
+
+  [[ -f "$conf" ]] || die "$conf not found."
+  if sudo grep -qF -- "$marker" "$conf" || sudo grep -qE '^[[:space:]]*alert_json[[:space:]]*=' "$conf"; then
+    log "alert_json is already configured in $conf — leaving it as is."
+    return
+  fi
+  log "Enabling alert_json output in $conf..."
+  if sudo grep -qE '^[[:space:]]*output[[:space:]]*=' "$conf"; then
+    warn "$conf already sets 'output'. Make sure its logdir is $SNORT_LOG_DIR."
+    output_line="-- output.logdir is set elsewhere in this file"
+  fi
+  sudo cp -a "$conf" "$conf.bak.$(date +%Y%m%d%H%M%S)"
+  sudo tee -a "$conf" >/dev/null <<LUA
+
+$marker
+$output_line
+alert_json =
+{
+    file = true,
+    limit = 100,  -- MB before Snort rolls the file over
+    fields = 'seconds timestamp priority class msg rule gid sid rev proto service ' ..
+             'pkt_len src_addr src_port dst_addr dst_port action dir iface',
+}
+LUA
+}
+
+install_dashboard() {
+  local dest="$SRC_DIR/snort3-dashboard"
+
+  log "Fetching snort3-dashboard $DASHBOARD_REF..."
+  command -v python3 >/dev/null || sudo apt-get install -y --no-install-recommends python3
+  rm -rf "$dest"
+  git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$DASHBOARD_REF" "$DASHBOARD_REPO" "$dest"
+  if [[ -n "$DASHBOARD_COMMIT" ]]; then
+    local head
+    head="$(git -C "$dest" rev-parse HEAD)"
+    [[ "$head" == "$DASHBOARD_COMMIT" ]] \
+      || die "snort3-dashboard $DASHBOARD_REF is at $head, expected $DASHBOARD_COMMIT. Set DASHBOARD_COMMIT= to skip this check."
+  fi
+
+  "$dest/install.sh" --log-dir "$SNORT_LOG_DIR" --dir "$DASHBOARD_DIR" --port "$DASHBOARD_PORT"
+
+  log "Checking the Snort config..."
+  if sudo "$PREFIX/bin/snort" -c "$PREFIX/etc/snort/snort.lua" -T -q >/dev/null 2>&1; then
+    log "Config OK. Start Snort with: sudo snort -c $PREFIX/etc/snort/snort.lua -i <interface>"
+  else
+    warn "snort -T reported a problem. Check it with: sudo snort -c $PREFIX/etc/snort/snort.lua -T"
+  fi
+}
+
+if [[ "$DASHBOARD" == "1" ]]; then
+  enable_alert_json
+  install_dashboard
 fi
